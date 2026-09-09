@@ -24,9 +24,10 @@
 # Set CUE_STRICT_ID=1 to refuse instead any box whose hostname is not a unit id
 # (guide 1's rule that a shared name must never identify a unit).
 #
-# Every run ends with one scannable line:
+# Every run ends with one scannable line, including how long it took:
 #   CUE-PHASE1 OK rc=0 host=... sku=... board=... nic=... ip=... mac=...
 #              posture=A send=OK 12 rules=10 fe80=yes mode=install
+#              elapsed=11s phase1=4s
 #
 # Overrides (environment):
 #   CUE_SKU=...            record this exact unit id for this box
@@ -54,20 +55,30 @@ case "$MODE" in
 esac
 
 PHASE1_URL=${CUE_PHASE1_URL:-https://raw.githubusercontent.com/CueHome/Deploy-IPv6/main/cue-matter-ipv6-changes.sh}
-PHASE1_SHA256=${CUE_PHASE1_SHA256:-bd280508b8d8629dec745c2eb2522c677978e1acfdefb4125ab054b5f94ee608}
+PHASE1_SHA256=${CUE_PHASE1_SHA256:-1d473b1ce1bc4cab3960a8abb2f2e354e171cfa4242d7df85fde26cd9153cc82}
 LOGDIR=/var/log/cue-matter-ipv6
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+START_EPOCH=$(date -u +%s)
 HOST=$(hostname 2>/dev/null || echo unknown)
 
 # summary fields, all pre-set so `set -u` is safe on an early abort
 SKU=""; SKU_SRC=""; NIC=""; NIC_SRC=""; BOARD=""; EXPECT=""
 IPV4=""; MAC=""; FE80=""; POSTURE=""; SEND=""; RULES=""
-TMPD=""; LOCK=""
+TMPD=""; LOCK=""; LOG=""; PHASE1_SECS="?"
 
 result() {
-    printf 'CUE-PHASE1 %s rc=%s host=%s sku=%s board=%s nic=%s ip=%s mac=%s posture=%s send=%s rules=%s fe80=%s mode=%s %s\n' \
+    _now=$(date -u +%s)
+    _elapsed=$((_now - START_EPOCH))
+    _line=$(printf 'CUE-PHASE1 %s rc=%s host=%s sku=%s board=%s nic=%s ip=%s mac=%s posture=%s send=%s rules=%s fe80=%s mode=%s elapsed=%ss phase1=%ss %s' \
         "$1" "$2" "$HOST" "${SKU:-?}" "${BOARD:-?}" "${NIC:-?}" "${IPV4:-?}" "${MAC:-?}" \
-        "${POSTURE:-?}" "${SEND:-?}" "${RULES:-?}" "${FE80:-?}" "$MODE" "${3:-}"
+        "${POSTURE:-?}" "${SEND:-?}" "${RULES:-?}" "${FE80:-?}" "$MODE" \
+        "$_elapsed" "$PHASE1_SECS" "${3:-}")
+    printf '%s\n' "$_line"
+    # keep the verdict in the log too, so a later audit does not depend on
+    # whatever MeshCentral still has in its output pane
+    if [ -n "$LOG" ] && [ -w "$LOG" ]; then
+        printf '%s\n' "$_line" >> "$LOG"
+    fi
 }
 abort() {
     printf 'ABORT: %s\n' "$1" >&2
@@ -248,7 +259,10 @@ LOG="$LOGDIR/deploy-$MODE-$SKU-$STAMP.log"
 printf 'running  : sh cue-matter-ipv6-phase1.sh %s\n\n' "$*"
 
 rc=0
+_p0=$(date -u +%s)
 sh "$P1" "$@" </dev/null >"$LOG" 2>&1 || rc=$?
+_p1=$(date -u +%s)
+PHASE1_SECS=$((_p1 - _p0))
 cat "$LOG"
 
 # --------------------------------------------------------------- 8. summarise
@@ -260,6 +274,8 @@ if [ -z "$RULES" ]; then
 fi
 
 printf '\nlog      : %s\n' "$LOG"
+printf 'timing   : phase1 %ss, wrapper total %ss (started %s)\n' \
+    "$PHASE1_SECS" "$(( $(date -u +%s) - START_EPOCH ))" "$STAMP"
 
 case "$rc" in
     0) if [ "$MODE" = baseline ]; then result BASELINE-OK "$rc"; else result OK "$rc"; fi ;;
