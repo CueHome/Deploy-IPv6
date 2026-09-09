@@ -16,17 +16,21 @@
 # Per-box values are DERIVED, never typed, because a group action sends identical
 # text to every device:
 #   NIC = the interface holding the default IPv4 route, cross-checked against the
-#         board's expected names (Orange Pi CM5 / CM4)
-#   SKU = the hostname, only when it looks like a unit id (CC0123-010001)
-# Anything ambiguous aborts THIS box with a reason and installs nothing. A box
-# answering to a shared name such as `cuehome` is refused outright (guide 1).
+#         board's expected names (Orange Pi CM5 / CM4). An off-list or ambiguous
+#         NIC still aborts an install: rules on the wrong NIC give a dark bridge.
+#   SKU = the hostname when it looks like a unit id (CC0123-010001), otherwise
+#         auto-<hostname>-<mac>, which is unique per box because the MAC is.
+#         Nothing to type, and no box is skipped for being named `cuehome`.
+# Set CUE_STRICT_ID=1 to refuse instead any box whose hostname is not a unit id
+# (guide 1's rule that a shared name must never identify a unit).
 #
 # Every run ends with one scannable line:
 #   CUE-PHASE1 OK rc=0 host=... sku=... board=... nic=... ip=... mac=...
 #              posture=A send=OK 12 rules=10 fe80=yes mode=install
 #
 # Overrides (environment):
-#   CUE_SKU=...            skip the hostname guard for this box
+#   CUE_SKU=...            record this exact unit id for this box
+#   CUE_STRICT_ID=1        refuse boxes whose hostname is not a unit id
 #   CUE_LAN_NIC=...        skip default-route derivation for this box
 #   CUE_PHASE1_URL=...     fetch the Phase 1 script from elsewhere
 #   CUE_PHASE1_SHA256=...  expected digest (default: pinned below)
@@ -112,28 +116,7 @@ case "$dt" in
 esac
 printf 'board    : %s (dt model: %s)\n' "$BOARD" "${dt:-none}"
 
-# --------------------------------------------------------------- 4. identity
-# Guide 1: never select or record a box by a shared name. Two units have
-# answered to `cuehome`, and a tunnel can land on the wrong SBC.
-if [ -n "${CUE_SKU:-}" ]; then
-    SKU=$CUE_SKU
-    SKU_SRC=override
-else
-    case "$HOST" in
-        cuehome|CUEHOME|localhost|localhost.localdomain|orangepi*|OrangePi*|armbian|ubuntu|debian|raspberrypi|cue|cuedesk)
-            abort "hostname '$HOST' is a shared or default name — guide 1 forbids identifying a box this way; re-run this box with CUE_SKU=<unit id>" 2 ;;
-    esac
-    case "$HOST" in
-        [A-Za-z][A-Za-z][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9]*)
-            SKU=$HOST
-            SKU_SRC=hostname ;;
-        *)
-            abort "hostname '$HOST' does not look like a unit id (expected e.g. CC0123-010001 or HC2609-00001); re-run this box with CUE_SKU=<unit id>" 2 ;;
-    esac
-fi
-printf 'sku      : %s (from %s)\n' "$SKU" "$SKU_SRC"
-
-# -------------------------------------------------------------------- 5. NIC
+# -------------------------------------------------------------------- 4. NIC
 if [ -n "${CUE_LAN_NIC:-}" ]; then
     NIC=$CUE_LAN_NIC
     NIC_SRC=override
@@ -187,6 +170,30 @@ else
     FE80=no
 fi
 printf 'nic      : %s (from %s) ip=%s mac=%s fe80=%s\n' "$NIC" "$NIC_SRC" "$IPV4" "$MAC" "$FE80"
+
+# --------------------------------------------------------------- 5. identity
+# The fleet row needs an identifier, not a typed serial. A unit-id hostname is
+# used as-is; anything else becomes auto-<hostname>-<mac>, unique because the
+# MAC is. CUE_STRICT_ID=1 restores the refuse-unless-unit-id behaviour.
+if [ -n "${CUE_SKU:-}" ]; then
+    SKU=$CUE_SKU
+    SKU_SRC=override
+else
+    case "$HOST" in
+        [A-Za-z][A-Za-z][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9]*)
+            SKU=$HOST
+            SKU_SRC=hostname ;;
+        *)
+            if [ "${CUE_STRICT_ID:-0}" = 1 ]; then
+                abort "hostname '$HOST' is not a unit id and CUE_STRICT_ID=1 is set; re-run this box with CUE_SKU=<unit id>" 2
+            fi
+            macsuffix=$(printf '%s' "$MAC" | tr -d ':' | tr -c '\-A-Za-z0-9._' '-')
+            hostpart=$(printf '%s' "$HOST" | tr -c '\-A-Za-z0-9._' '-')
+            SKU="auto-$hostpart-$macsuffix"
+            SKU_SRC=auto-hostname-mac ;;
+    esac
+fi
+printf 'sku      : %s (from %s)\n' "$SKU" "$SKU_SRC"
 
 # --------------------------------------------------------- 6. fetch + verify
 TMPD=$(mktemp -d)
