@@ -211,16 +211,30 @@ esac
 if grep -q 'ipv6\.disable=1' /proc/cmdline 2>/dev/null; then
     die "ipv6.disable=1 is in /proc/cmdline (Orange Pi images ship this on some builds). Fix the boot args in a separate window, reboot, then re-run." 4
 fi
+# The per-interface value is what the kernel actually enforces on a link.
+# conf.all.disable_ipv6 is a write-time broadcast, not a live override: a box
+# can read all=1 from boot and still have IPv6 up on the house NIC because
+# something (usually NetworkManager) set that NIC back to 0 afterwards. So the
+# NIC's own value is the gate; all/default are recorded as a reboot risk.
 sysctl_get() { cat "/proc/sys/net/ipv6/conf/$1/disable_ipv6" 2>/dev/null || echo "?"; }
 D_ALL=$(sysctl_get all)
 D_NIC=$(sysctl_get "$NIC")
 D_DEF=$(sysctl_get default)
-log "ipv6 disable_ipv6: all=$D_ALL default=$D_DEF $NIC=$D_NIC"
-[ "$D_ALL" = 1 ] &&
-    die "net.ipv6.conf.all.disable_ipv6=1 — IPv6 is off on this host. Separate window (this programme does not change sysctl)." 4
-[ "$D_NIC" = 1 ] &&
+log "ipv6 disable_ipv6: all=$D_ALL default=$D_DEF $NIC=$D_NIC  (the NIC value governs)"
+if [ "$D_NIC" = 1 ]; then
     die "net.ipv6.conf.$NIC.disable_ipv6=1 — IPv6 is off on the house NIC. Separate window (this programme does not change sysctl)." 4
-[ "$D_DEF" = 1 ] && warn "net.ipv6.conf.default.disable_ipv6=1 — new interfaces come up without IPv6; note it on the row"
+fi
+if [ "$D_NIC" = "?" ]; then
+    die "no /proc/sys/net/ipv6/conf/$NIC/disable_ipv6 — the kernel has no IPv6 state for this NIC. Separate window." 4
+fi
+if [ "$D_ALL" = 1 ]; then
+    warn "conf.all.disable_ipv6=1 is stored on this host while $NIC is live at 0 — something re-enabled the NIC after boot. Phase 1 can proceed, but this box MUST be reboot-verified and the config fixed in a separate window, or it comes back dark."
+    grep -rIn 'disable_ipv6' /etc/sysctl.conf /etc/sysctl.d /usr/lib/sysctl.d /lib/sysctl.d 2>/dev/null |
+        sed 's/^/  sets it: /' || true
+fi
+if [ "$D_DEF" = 1 ]; then
+    warn "conf.default.disable_ipv6=1 — any new or re-created interface comes up without IPv6; note it on the row"
+fi
 
 # --- ip6tables must be able to read the filter table. On Rockchip vendor
 # --- kernels ip6table_filter is often a module that is not yet loaded.
