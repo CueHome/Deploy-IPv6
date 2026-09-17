@@ -182,8 +182,10 @@ if [ -z "$NIC" ]; then
     exit 1
 fi
 case "$NIC" in
-    *[!a-zA-Z0-9_.:-]*) die "Invalid NIC name: $NIC" ;;
+    -*|*[!a-zA-Z0-9_.:-]*) die "Invalid NIC name: $NIC" ;;
 esac
+[ "${#NIC}" -le 15 ] || die "NIC name exceeds Linux IFNAMSIZ (15 characters)"
+case "$NIC" in .|..) die "Invalid NIC name: $NIC" ;; esac
 
 # ------------------------------------------------------------- 0. preflight
 step "0. Preflight"
@@ -195,6 +197,12 @@ done
 if [ "$BASELINE_ONLY" -eq 0 ]; then
     command -v systemctl >/dev/null 2>&1 || die "missing required tool: systemctl"
     command -v install   >/dev/null 2>&1 || die "missing required tool: install"
+    command -v flock >/dev/null 2>&1 || die "missing required tool: flock"
+    [ -d /run/systemd/system ] || die "installation requires systemd as the running service manager"
+    # The descriptor remains open until the installer exits, including signal exit.
+    install -d -m 0700 /run/cue-matter-ipv6
+    exec 9>/run/cue-matter-ipv6/install.lock
+    flock -w 10 9 || die "another installer is active (10 second lock timeout)"
 fi
 log "root: yes    tools: ok"
 
@@ -249,39 +257,6 @@ if [ "$D_DEF" = 1 ]; then
     warn "conf.default.disable_ipv6=1 — any new or re-created interface comes up without IPv6; note it on the row"
 fi
 
-# --- ip6tables must be able to read the filter table. On Rockchip vendor
-# --- kernels ip6table_filter is often a module that is not yet loaded.
-IP6T_VER=$(ip6tables -V 2>/dev/null || echo unknown)
-log "ip6tables: $IP6T_VER"
-if ! ip6tables -S >/dev/null 2>&1; then
-    if [ "$LOAD_MODULES" -eq 1 ]; then
-        warn "ip6tables filter table unreadable — loading ip6table_filter"
-        modprobe ip6table_filter 2>/dev/null || true
-        modprobe ip6_tables 2>/dev/null || true
-    fi
-    if ! ip6tables -S >/dev/null 2>&1; then
-        printf 'ip6tables cannot read the filter table on this kernel.\n' >&2
-        printf 'On Orange Pi CM5/CM4 vendor kernels this is usually a missing module.\n' >&2
-        printf 'Try:  modprobe ip6table_filter   (or re-run with --load-modules)\n' >&2
-        printf 'If modprobe fails, the kernel lacks CONFIG_IP6_NF_FILTER — separate window.\n' >&2
-        die "ip6tables filter table unavailable" 4
-    fi
-    log "ip6tables filter table now readable"
-    if [ "$LOAD_MODULES" -eq 1 ] && [ "$BASELINE_ONLY" -eq 0 ]; then
-        printf 'ip6_tables\nip6table_filter\n' > "$MODCONF"
-        log "persisted module load: $MODCONF"
-    fi
-fi
-case "$IP6T_VER" in
-    *nf_tables*) log "backend  : nf_tables (rules land in the nft ruleset; ufw6 chains, if any, share it)" ;;
-    *legacy*)    log "backend  : legacy xtables" ;;
-esac
-if [ -x /usr/sbin/ip6tables-legacy ] && [ -x /usr/sbin/ip6tables-nft ]; then
-    case "$IP6T_VER" in
-        *nf_tables*) ip6tables-legacy -S 2>/dev/null | grep -q '^-A' &&
-            warn "the legacy ip6tables ruleset is non-empty while the default backend is nf_tables — two rulesets are live on this box" ;;
-    esac
-fi
 
 ip link show dev "$NIC" >/dev/null 2>&1 || {
     printf 'NIC %s does not exist on this box.\n' "$NIC" >&2
@@ -357,6 +332,47 @@ else
     warn "no --expect-ipv4/--expect-mac given: confirm the row above against the fleet sheet before continuing"
 fi
 
+# Module loading is allowed only after NIC and fleet validation and confirmation.
+if [ "$LOAD_MODULES" -eq 1 ] && [ "$ASSUME_YES" -eq 0 ]; then
+    printf 'Load IPv6 kernel modules on %s? Type the NIC name: ' "$NIC"
+    read -r module_reply || module_reply=""
+    [ "$module_reply" = "$NIC" ] || die "module loading not confirmed"
+fi
+PERSIST_MODULES=0
+# --- ip6tables must be able to read the filter table. On Rockchip vendor
+# --- kernels ip6table_filter is often a module that is not yet loaded.
+IP6T_VER=$(ip6tables -V 2>/dev/null || echo unknown)
+log "ip6tables: $IP6T_VER"
+if ! ip6tables -S >/dev/null 2>&1; then
+    if [ "$LOAD_MODULES" -eq 1 ]; then
+        warn "ip6tables filter table unreadable — loading ip6table_filter"
+        modprobe ip6table_filter 2>/dev/null || true
+        modprobe ip6_tables 2>/dev/null || true
+    fi
+    if ! ip6tables -S >/dev/null 2>&1; then
+        printf 'ip6tables cannot read the filter table on this kernel.\n' >&2
+        printf 'On Orange Pi CM5/CM4 vendor kernels this is usually a missing module.\n' >&2
+        printf 'Try:  modprobe ip6table_filter   (or re-run with --load-modules)\n' >&2
+        printf 'If modprobe fails, the kernel lacks CONFIG_IP6_NF_FILTER — separate window.\n' >&2
+        die "ip6tables filter table unavailable" 4
+    fi
+    log "ip6tables filter table now readable"
+    if [ "$LOAD_MODULES" -eq 1 ] && [ "$BASELINE_ONLY" -eq 0 ]; then
+        PERSIST_MODULES=1
+        log "module persistence staged for installation"
+    fi
+fi
+case "$IP6T_VER" in
+    *nf_tables*) log "backend  : nf_tables (rules land in the nft ruleset; ufw6 chains, if any, share it)" ;;
+    *legacy*)    log "backend  : legacy xtables" ;;
+esac
+if [ -x /usr/sbin/ip6tables-legacy ] && [ -x /usr/sbin/ip6tables-nft ]; then
+    case "$IP6T_VER" in
+        *nf_tables*) ip6tables-legacy -S 2>/dev/null | grep -q '^-A' &&
+            warn "the legacy ip6tables ruleset is non-empty while the default backend is nf_tables — two rulesets are live on this box" ;;
+    esac
+fi
+
 # ------------------------------------------------------------- 3. baseline
 send_probe() {
     CUE_LAN_NIC="$NIC" python3 - <<'PY'
@@ -378,7 +394,14 @@ PY
 }
 
 count_nic_rules() {
-    ip6tables -S 2>/dev/null | grep -c -E -- "-(i|o) ${NIC}\b" || true
+    ip6tables -S 2>/dev/null | awk -v nic="$NIC" '
+        {for (i=1;i<NF;i++) if (($i=="-i" || $i=="-o") && $(i+1)==nic) {n++;break}}
+        END {print n+0}'
+}
+
+show_nic_rules() {
+    ip6tables -S | awk -v nic="$NIC" '
+        {for (i=1;i<NF;i++) if (($i=="-i" || $i=="-o") && $(i+1)==nic) {print;break}}'
 }
 
 # The ten lines the unit is responsible for (guide 3.3), checked individually so
@@ -386,13 +409,13 @@ count_nic_rules() {
 check_expected_rules() {
     missing=0
     for port in 5353 5540; do
-        ip6tables -w -C INPUT  -i "$NIC" -p udp --sport "$port" -j ACCEPT 2>/dev/null || { warn "missing: INPUT  -i $NIC udp --sport $port"; missing=$((missing + 1)); }
-        ip6tables -w -C INPUT  -i "$NIC" -p udp --dport "$port" -j ACCEPT 2>/dev/null || { warn "missing: INPUT  -i $NIC udp --dport $port"; missing=$((missing + 1)); }
-        ip6tables -w -C OUTPUT -o "$NIC" -p udp --sport "$port" -j ACCEPT 2>/dev/null || { warn "missing: OUTPUT -o $NIC udp --sport $port"; missing=$((missing + 1)); }
-        ip6tables -w -C OUTPUT -o "$NIC" -p udp --dport "$port" -j ACCEPT 2>/dev/null || { warn "missing: OUTPUT -o $NIC udp --dport $port"; missing=$((missing + 1)); }
+        ip6tables -w 5 -C INPUT  -i "$NIC" -p udp --sport "$port" -j ACCEPT 2>/dev/null || { warn "missing: INPUT  -i $NIC udp --sport $port"; missing=$((missing + 1)); }
+        ip6tables -w 5 -C INPUT  -i "$NIC" -p udp --dport "$port" -j ACCEPT 2>/dev/null || { warn "missing: INPUT  -i $NIC udp --dport $port"; missing=$((missing + 1)); }
+        ip6tables -w 5 -C OUTPUT -o "$NIC" -p udp --sport "$port" -j ACCEPT 2>/dev/null || { warn "missing: OUTPUT -o $NIC udp --sport $port"; missing=$((missing + 1)); }
+        ip6tables -w 5 -C OUTPUT -o "$NIC" -p udp --dport "$port" -j ACCEPT 2>/dev/null || { warn "missing: OUTPUT -o $NIC udp --dport $port"; missing=$((missing + 1)); }
     done
-    ip6tables -w -C INPUT  -i "$NIC" -p ipv6-icmp -j ACCEPT 2>/dev/null || { warn "missing: INPUT  -i $NIC ipv6-icmp"; missing=$((missing + 1)); }
-    ip6tables -w -C OUTPUT -o "$NIC" -p ipv6-icmp -j ACCEPT 2>/dev/null || { warn "missing: OUTPUT -o $NIC ipv6-icmp"; missing=$((missing + 1)); }
+    ip6tables -w 5 -C INPUT  -i "$NIC" -p ipv6-icmp -j ACCEPT 2>/dev/null || { warn "missing: INPUT  -i $NIC ipv6-icmp"; missing=$((missing + 1)); }
+    ip6tables -w 5 -C OUTPUT -o "$NIC" -p ipv6-icmp -j ACCEPT 2>/dev/null || { warn "missing: OUTPUT -o $NIC ipv6-icmp"; missing=$((missing + 1)); }
     return "$missing"
 }
 
@@ -425,7 +448,7 @@ log ""
 log "Posture: $POSTURE"
 
 if [ "$BASELINE_ONLY" -eq 1 ]; then
-    step "Baseline only — nothing was changed"
+    step "Baseline collected — no configuration changes; UDP probe was sent"
     log "Re-run without --baseline-only to install the host unit."
     exit 0
 fi
@@ -459,6 +482,9 @@ fi
 
 # --------------------------------------------------------------- 4. install
 step "4. Install host unit (guide 3.3)"
+if [ "$PERSIST_MODULES" -eq 1 ]; then
+    printf 'ip6_tables\nip6table_filter\n' > "$MODCONF"
+fi
 
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
@@ -469,16 +495,19 @@ trap 'exit 143' TERM
 cat >"$TMPD/cue-matter-ipv6-rules" <<'RULES_EOF'
 #!/bin/sh
 set -eu
-nic=${CUE_LAN_NIC:-end1}
+nic=${CUE_LAN_NIC:-}
 case "$nic" in
-    ""|*[!a-zA-Z0-9_.:-]*) echo "Invalid CUE_LAN_NIC" >&2; exit 1 ;;
+    ""|-*|.|..|*[!a-zA-Z0-9_.:-]*) echo "Invalid CUE_LAN_NIC" >&2; exit 1 ;;
 esac
+[ "${#nic}" -le 15 ] || exit 1
 ip link show dev "$nic" >/dev/null
+exec 8>/run/cue-matter-ipv6/rules.lock
+flock -w 10 8 || { echo "rules lock timeout" >&2; exit 1; }
 allow() {
     chain=$1
     shift
-    ip6tables -w -C "$chain" "$@" 2>/dev/null ||
-        ip6tables -w -I "$chain" 1 "$@"
+    ip6tables -w 5 -C "$chain" "$@" 2>/dev/null ||
+        ip6tables -w 5 -I "$chain" 1 "$@"
 }
 for port in 5353 5540; do
     allow INPUT  -i "$nic" -p udp --sport "$port" -j ACCEPT
@@ -500,23 +529,31 @@ cat >"$TMPD/cue-matter-ipv6-wait-nic" <<'WAIT_EOF'
 # Wait for the Cue LAN NIC to exist. Orange Pi CM5/CM4 rename the onboard GbE
 # in udev; a oneshot ordered after network-online.target can still be early.
 set -eu
-nic=${CUE_LAN_NIC:-end1}
+nic=${CUE_LAN_NIC:-}
 wait_for=${CUE_NIC_WAIT:-30}
 case "$nic" in
-    ""|*[!a-zA-Z0-9_.:-]*) echo "Invalid CUE_LAN_NIC" >&2; exit 1 ;;
+    ""|-*|.|..|*[!a-zA-Z0-9_.:-]*) echo "Invalid CUE_LAN_NIC" >&2; exit 1 ;;
 esac
+[ "${#nic}" -le 15 ] || exit 1
 case "$wait_for" in
-    ''|*[!0-9]*) wait_for=30 ;;
+    ''|*[!0-9]*|????*) echo "Invalid CUE_NIC_WAIT" >&2; exit 1 ;;
 esac
+[ "$wait_for" -ge 1 ] && [ "$wait_for" -le 300 ] || exit 1
 n=0
 while [ "$n" -lt "$wait_for" ]; do
     if ip link show dev "$nic" >/dev/null 2>&1; then
-        exit 0
+        # Presence alone can precede carrier and duplicate-address detection.
+        if ip -o link show dev "$nic" | grep -q 'LOWER_UP' &&
+            ip -o link show dev "$nic" | grep -q 'MULTICAST' &&
+            ip -6 -o addr show dev "$nic" scope link |
+                awk '/inet6 fe80:/ && !/tentative|dadfailed/ {ok=1} END {exit !ok}'; then
+            exit 0
+        fi
     fi
     n=$((n + 1))
     sleep 1
 done
-echo "NIC $nic did not appear within ${wait_for}s" >&2
+echo "NIC $nic has no usable carrier/multicast/link-local address within ${wait_for}s" >&2
 exit 1
 WAIT_EOF
 
@@ -532,6 +569,10 @@ PartOf=docker.service
 
 [Service]
 Type=oneshot
+RuntimeDirectory=cue-matter-ipv6
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+TimeoutStartSec=450
 Environment=CUE_LAN_NIC=$NIC
 Environment=CUE_NIC_WAIT=$NIC_WAIT
 EnvironmentFile=-$DEFAULTS
@@ -576,7 +617,7 @@ case "$ACTIVE"  in active)  ;; *) warn "unit not active";  FAIL=1 ;; esac
 
 log ""
 log "-- $NIC rules"
-ip6tables -S | grep -E -- "-(i|o) ${NIC}\b" || true
+show_nic_rules
 RULES=$(count_nic_rules)
 log ""
 log "$NIC-scoped lines in ip6tables: $RULES (guide expects $EXPECTED_RULES)"
@@ -635,7 +676,7 @@ EVIDENCE=$(mktemp "$EVIDENCE_DIR/phase1-${SKU:-$NIC}-$STAMP.XXXXXX")
     printf '\n-- ip6tables policies --\n'
     ip6tables -S | grep -E '^-P ' || true
     printf '\n-- %s rules --\n' "$NIC"
-    ip6tables -S | grep -E -- "-(i|o) ${NIC}\b" || true
+    show_nic_rules
 } > "$EVIDENCE"
 log ""
 log "evidence written: $EVIDENCE"
