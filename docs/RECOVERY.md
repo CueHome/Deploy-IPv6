@@ -55,6 +55,12 @@ descriptor when invoking the companion. Rollback also serializes rule deletion.
 
 ## Evidence
 
+Source/delivery commit: `914cfe3bf148a97f018e954e8d2977aabd49c976`.
+[CI run 35178764338](https://github.com/CueHome/Deploy-IPv6/actions/runs/35178764338)
+passed: 11 preflight rejection cases, 11 helper tests, 11 transaction tests and
+the actual Linux network-namespace rule/rollback tests. Systemctl remained
+mocked in the transaction tests; no board or real service recovery was tested.
+
 `test/transaction.py` executes the actual transaction implementation against
 temporary files with injected service commands: startup failure, second-file
 write failure, process death after the first replacement, independent edits,
