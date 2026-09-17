@@ -10,7 +10,7 @@
 #   Shell: "Linux/BSD/macOS Command Shell"      Run as: "agent"
 #
 # Modes:
-#   baseline   (default) read-only. Changes nothing. Reports NIC, posture, send.
+#   baseline   (default) diagnostic: writes logs and sends a UDP probe.
 #   install    installs + enables the host unit, then proves it.
 #
 # Per-box values are DERIVED, never typed, because a group action sends identical
@@ -35,7 +35,7 @@
 #   CUE_LAN_NIC=...        skip default-route derivation for this box
 #   CUE_PHASE1_URL=...     fetch the Phase 1 script from elsewhere
 #   CUE_PHASE1_SHA256=...  expected digest (default: pinned below)
-#   CUE_SKIP_DIGEST=1      run an unverified script (do not use on a fleet)
+#   CUE_SKIP_DIGEST=1      rejected; verification is mandatory
 #   CUE_LOAD_MODULES=1     load ip6table_filter if the filter table is missing
 #   CUE_NIC_WAIT=30        boot-time NIC wait baked into the unit
 #
@@ -43,6 +43,7 @@
 #   0 ok | 1 usage/preflight | 2 identity/board mismatch | 3 proof failed
 #   4 host cannot do IPv6 | 64 wrapper usage | 65 fetch/verify failed
 set -eu
+umask 077
 
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin:/usr/bin:/bin:$PATH
 export PATH
@@ -54,8 +55,20 @@ case "$MODE" in
     *) printf 'usage: deploy-phase1.sh [baseline|install]\n' >&2; exit 64 ;;
 esac
 
-PHASE1_URL=${CUE_PHASE1_URL:-https://raw.githubusercontent.com/CueHome/Deploy-IPv6/main/cue-matter-ipv6-changes.sh}
-PHASE1_SHA256=${CUE_PHASE1_SHA256:-1d473b1ce1bc4cab3960a8abb2f2e354e171cfa4242d7df85fde26cd9153cc82}
+if [ "${CUE_SKIP_DIGEST:-0}" = 1 ]; then
+    printf 'ABORT: digest bypass is not supported\n' >&2
+    exit 65
+fi
+if [ "$MODE" = baseline ] && [ "${CUE_LOAD_MODULES:-0}" = 1 ]; then
+    printf 'ABORT: baseline cannot load kernel modules\n' >&2
+    exit 64
+fi
+case "${CUE_SKU:-}" in
+    *[!a-zA-Z0-9_-]*) printf 'ABORT: invalid CUE_SKU\n' >&2; exit 64 ;;
+esac
+
+PHASE1_URL=${CUE_PHASE1_URL:-https://raw.githubusercontent.com/CueHome/Deploy-IPv6/83d4272748a1e709e76ca11f230bf4dc19858823/cue-matter-ipv6-changes.sh}
+PHASE1_SHA256=${CUE_PHASE1_SHA256:-f98153661a89bc17aa8c30c1ebaec0cb7d593a8b5d08b3d9bdd04a1ee9a877d2}
 LOGDIR=/var/log/cue-matter-ipv6
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 START_EPOCH=$(date -u +%s)
@@ -91,7 +104,9 @@ cleanup() {
     [ -n "$LOCK" ] && rmdir "$LOCK" 2>/dev/null
     return 0
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 printf '== CueRated Matter Phase 1 deploy (%s) on %s at %s\n' "$MODE" "$HOST" "$STAMP"
 
@@ -199,12 +214,16 @@ else
                 abort "hostname '$HOST' is not a unit id and CUE_STRICT_ID=1 is set; re-run this box with CUE_SKU=<unit id>" 2
             fi
             macsuffix=$(printf '%s' "$MAC" | tr -d ':' | tr -c '\-A-Za-z0-9._' '-')
-            hostpart=$(printf '%s' "$HOST" | tr -c '\-A-Za-z0-9._' '-')
+            hostpart=$(printf '%s' "$HOST" | tr -c '\-A-Za-z0-9_' '-')
             SKU="auto-$hostpart-$macsuffix"
             SKU_SRC=auto-hostname-mac ;;
     esac
 fi
 printf 'sku      : %s (from %s)\n' "$SKU" "$SKU_SRC"
+case "$SKU" in
+    ''|*[!a-zA-Z0-9_-]*) abort "SKU must contain only letters, digits, underscore and hyphen" 2 ;;
+esac
+[ "${#SKU}" -le 80 ] || abort "SKU exceeds 80 characters" 2
 
 # --------------------------------------------------------- 6. fetch + verify
 TMPD=$(mktemp -d)
@@ -227,10 +246,8 @@ if command -v sha256sum >/dev/null 2>&1; then
 elif command -v openssl >/dev/null 2>&1; then
     GOT=$(openssl dgst -sha256 "$P1" | awk '{print $NF}')
 fi
-if [ "${CUE_SKIP_DIGEST:-0}" = 1 ]; then
-    printf 'WARN: digest check skipped by CUE_SKIP_DIGEST=1 (sha256 %s)\n' "${GOT:-unavailable}" >&2
-elif [ -z "$GOT" ]; then
-    abort "no sha256sum or openssl on this box to verify the script; set CUE_SKIP_DIGEST=1 only if you accept that" 65
+if [ -z "$GOT" ]; then
+    abort "no sha256sum or openssl on this box to verify the script" 65
 elif [ "$GOT" != "$PHASE1_SHA256" ]; then
     printf 'expected sha256: %s\n' "$PHASE1_SHA256" >&2
     printf 'observed sha256: %s\n' "$GOT" >&2
@@ -255,7 +272,7 @@ if [ "$MODE" = baseline ]; then
 fi
 
 mkdir -p "$LOGDIR"
-LOG="$LOGDIR/deploy-$MODE-$SKU-$STAMP.log"
+LOG=$(mktemp "$LOGDIR/deploy-$MODE-$SKU-$STAMP.XXXXXX")
 printf 'running  : sh cue-matter-ipv6-phase1.sh %s\n\n' "$*"
 
 rc=0
