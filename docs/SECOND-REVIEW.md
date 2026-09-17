@@ -5,10 +5,11 @@ Main remained 831e45a55e9c6fd4fbb55e5c24a70023e1bffc02 when checked.
 
 ## Release decision
 
-HOLD for production. This review includes executable shell regressions and saved
-environment evidence. No current board or real Linux firewall tests have run.
+HOLD for production. This review includes executable shell regressions, a passing
+Linux network-namespace CI run and saved environment evidence. No current board tests have run.
 Local Docker points at Colima, whose daemon socket is absent. Do not count the
 simulated Linux-command tests as kernel, systemd, controller or HA qualification.
+The separate namespace test provides limited kernel evidence, not field qualification.
 
 ## Environment evidence
 
@@ -56,7 +57,12 @@ fixed in the preceding package; the others were addressed or qualified in this p
 - `python3 test/runtime.py`: 11 tests execute generated shell helpers using simulated Linux commands. Tests cover duplicate application, missing/invalid NIC pins, lock failure, insertion failure, carrier, DAD, bounded waits and literal VLAN matching.
 - `TEST_REVISION=599a50c python3 test/runtime.py -k tentative`: fails as expected; the old helper incorrectly returns success. The same test passes on the candidate.
 - `git diff --check`: passes.
-- CI includes both test programs. CI status is separate from local results.
+- [CI run 35177460447](https://github.com/CueHome/Deploy-IPv6/actions/runs/35177460447)
+  passed on exact source/delivery commit `54a64c56cbdfc864b603e013bdeef69996ac6840`.
+  In addition to both test programs, `sudo sh test/linux-netns.sh` passed using
+  real Linux iptables and interfaces in an isolated namespace: repeat application
+  was identical, an unrelated SSH rule survived, and carrier loss failed readiness.
+  This does not verify systemd, production kernels, nft/legacy coexistence or controller traffic.
 
 The locks' real Linux cross-process behavior, service restart propagation, the
 new manager gate and module persistence are source-reviewed but need Linux
