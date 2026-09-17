@@ -27,6 +27,7 @@
 #   0 ok | 1 usage/preflight | 2 fleet-row or board mismatch
 #   3 proof failed | 4 host cannot do IPv6 (kernel/ip6tables) — separate window
 set -eu
+umask 077
 
 # sudo often hands over a trimmed PATH; ip/ip6tables/systemctl live in sbin.
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin:/usr/bin:/bin:$PATH
@@ -65,6 +66,10 @@ usage() {
 # ---------------------------------------------------------------- arguments
 while [ $# -gt 0 ]; do
     case "$1" in
+        --nic|--sku|--expect-ipv4|--expect-mac|--require-board|--nic-wait)
+            [ $# -ge 2 ] && [ -n "$2" ] || die "missing value for $1" ;;
+    esac
+    case "$1" in
         --nic)                   NIC=${2:-};            shift 2 ;;
         --nic=*)                 NIC=${1#*=};           shift ;;
         --sku)                   SKU=${2:-};            shift 2 ;;
@@ -87,8 +92,16 @@ while [ $# -gt 0 ]; do
 done
 
 case "$NIC_WAIT" in
-    ''|*[!0-9]*) die "--nic-wait must be a whole number of seconds" ;;
+    ''|*[!0-9]*|????*) die "--nic-wait must be an integer from 1 to 300" ;;
 esac
+[ "$NIC_WAIT" -ge 1 ] && [ "$NIC_WAIT" -le 300 ] || die "--nic-wait must be from 1 to 300"
+case "$SKU" in
+    *[!a-zA-Z0-9_-]*) die "--sku may contain only letters, digits, underscore and hyphen" ;;
+esac
+[ "${#SKU}" -le 80 ] || die "--sku is too long (maximum 80)"
+if [ "$BASELINE_ONLY" -eq 1 ] && [ "$LOAD_MODULES" -eq 1 ]; then
+    die "--baseline-only cannot be combined with --load-modules"
+fi
 
 # ------------------------------------------------------- board identification
 # CUE_DT_ROOT is a test hook: point it at a fake tree to rehearse the board
@@ -448,7 +461,9 @@ fi
 step "4. Install host unit (guide 3.3)"
 
 TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT INT TERM
+trap 'rm -rf "$TMPD"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # ExecStart payload — byte-identical to guide 3.3.
 cat >"$TMPD/cue-matter-ipv6-rules" <<'RULES_EOF'
@@ -539,8 +554,10 @@ chmod 0644 "$DEFAULTS"
 log "pinned $DEFAULTS -> CUE_LAN_NIC=$NIC"
 
 systemctl daemon-reload || die "systemctl daemon-reload failed — files are written but the unit is not loaded"
-systemctl enable --now cue-matter-ipv6-rules.service || {
-    warn "systemctl enable --now failed; unit journal follows"
+systemctl enable cue-matter-ipv6-rules.service || die "could not enable host unit" 3
+# start on an already-active oneshot does not execute its new payload.
+systemctl restart cue-matter-ipv6-rules.service || {
+    warn "host unit restart failed; unit journal follows"
     journalctl -u cue-matter-ipv6-rules.service -n 20 --no-pager 2>/dev/null || true
     die "could not enable/start cue-matter-ipv6-rules.service" 3
 }
@@ -590,7 +607,7 @@ esac
 # -------------------------------------------------------------- 6. evidence
 mkdir -p "$EVIDENCE_DIR"
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-EVIDENCE="$EVIDENCE_DIR/phase1-${SKU:-$NIC}-$STAMP.txt"
+EVIDENCE=$(mktemp "$EVIDENCE_DIR/phase1-${SKU:-$NIC}-$STAMP.XXXXXX")
 {
     printf 'CueRated Matter — Phase 1 host unit\n'
     printf 'timestamp_utc : %s\n' "$STAMP"
