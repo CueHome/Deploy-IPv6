@@ -67,8 +67,8 @@ case "${CUE_SKU:-}" in
     *[!a-zA-Z0-9_-]*) printf 'ABORT: invalid CUE_SKU\n' >&2; exit 64 ;;
 esac
 
-PHASE1_URL=${CUE_PHASE1_URL:-https://raw.githubusercontent.com/CueHome/Deploy-IPv6/83d4272748a1e709e76ca11f230bf4dc19858823/cue-matter-ipv6-changes.sh}
-PHASE1_SHA256=${CUE_PHASE1_SHA256:-f98153661a89bc17aa8c30c1ebaec0cb7d593a8b5d08b3d9bdd04a1ee9a877d2}
+PHASE1_URL=${CUE_PHASE1_URL:-https://raw.githubusercontent.com/CueHome/Deploy-IPv6/7bdae5925230b20615c8e945a63f491c7b5aa00e/cue-matter-ipv6-changes.sh}
+PHASE1_SHA256=${CUE_PHASE1_SHA256:-82ad62e949bbe1657c9fc4ea8cca09f776f813abfeefae2640833f91cbeb092a}
 LOGDIR=/var/log/cue-matter-ipv6
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 START_EPOCH=$(date -u +%s)
@@ -101,7 +101,6 @@ abort() {
 # shellcheck disable=SC2329  # invoked via trap
 cleanup() {
     [ -n "$TMPD" ] && rm -rf "$TMPD"
-    [ -n "$LOCK" ] && rmdir "$LOCK" 2>/dev/null
     return 0
 }
 trap cleanup EXIT
@@ -116,16 +115,11 @@ if [ "$(id -u)" != 0 ]; then
 fi
 
 # ------------------------------------------------------------------ 2. lock
-for d in /run/lock /var/lock /tmp; do
-    if [ -d "$d" ]; then
-        LOCK="$d/cue-matter-ipv6-deploy.lock"
-        break
-    fi
-done
-if ! mkdir "$LOCK" 2>/dev/null; then
-    LOCK=""
-    abort "another Phase 1 deploy is already running on this box" 1
-fi
+command -v flock >/dev/null 2>&1 || abort "missing required tool: flock" 1
+command -v install >/dev/null 2>&1 || abort "missing required tool: install" 1
+install -d -m 0700 /run/cue-matter-ipv6
+exec 9>/run/cue-matter-ipv6/wrapper.lock
+flock -w 10 9 || abort "another wrapper is active (10 second lock timeout)" 1
 
 # ------------------------------------------------------------- 3. board read
 dt=""
@@ -164,8 +158,9 @@ else
 fi
 
 case "$NIC" in
-    *[!a-zA-Z0-9_.:-]*) abort "derived NIC name '$NIC' is not a valid interface name" 1 ;;
+    ''|-*|*[!a-zA-Z0-9_.:-]*) abort "derived NIC name '$NIC' is not a valid interface name" 1 ;;
 esac
+[ "${#NIC}" -le 15 ] || abort "NIC name exceeds 15 characters" 1
 ip link show dev "$NIC" >/dev/null 2>&1 || abort "NIC '$NIC' does not exist on this box" 1
 case "$NIC" in
     lo|docker0|br-*|virbr*|veth*|tailscale0|wg0)
@@ -277,7 +272,7 @@ printf 'running  : sh cue-matter-ipv6-phase1.sh %s\n\n' "$*"
 
 rc=0
 _p0=$(date -u +%s)
-sh "$P1" "$@" </dev/null >"$LOG" 2>&1 || rc=$?
+    sh "$P1" "$@" 9>&- </dev/null >"$LOG" 2>&1 || rc=$?
 _p1=$(date -u +%s)
 PHASE1_SECS=$((_p1 - _p0))
 cat "$LOG"

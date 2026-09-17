@@ -1,5 +1,8 @@
 # Final-Fix implementation checkpoint
 
+Superseded for current progress by [Second review](SECOND-REVIEW.md).
+The following records the initial package, not the latest branch status.
+
 Base: 831e45a (remote main observed 17 September 2026).
 Branch: Final-Fix. Do not merge or deploy this checkpoint.
 
