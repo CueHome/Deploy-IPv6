@@ -1,5 +1,9 @@
 # Second review — Final-Fix
 
+Update: [Recoverable installation](RECOVERY.md) implements the subsequent
+file/service journal and ownership-aware rule rollback package. The findings
+below record the earlier checkpoint; field qualification remains open.
+
 Date: 17 September 2026. Reviewed baseline: 599a50c248b3e2ef7a80357ed68a1a2e01ff0b66.
 Main remained 831e45a55e9c6fd4fbb55e5c24a70023e1bffc02 when checked.
 

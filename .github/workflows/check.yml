@@ -9,4 +9,5 @@ jobs:
       - uses: actions/checkout@v4
       - run: sh test/preflight.sh
       - run: python3 test/runtime.py
+      - run: python3 test/transaction.py
       - run: sudo sh test/linux-netns.sh

@@ -43,4 +43,39 @@ ip -n "$ns" link set peer1 down
 if ip netns exec "$ns" env CUE_LAN_NIC=end1 CUE_NIC_WAIT=1 sh "$tmp/wait"; then
     echo 'FAIL: link without carrier incorrectly ready'; exit 1
 fi
+ip -n "$ns" link set peer1 up
+ip netns exec "$ns" python3 - "$tmp" <<'PY'
+import importlib.util
+import os
+from pathlib import Path
+import subprocess
+import sys
+spec=importlib.util.spec_from_file_location('recover','recover-install.py')
+recover=importlib.util.module_from_spec(spec);spec.loader.exec_module(recover)
+root=Path(sys.argv[1])/'transaction';stage=root/'stage';stage.mkdir(parents=True)
+for name,(relative,mode) in recover.FILES.items():
+    path=root/relative;path.parent.mkdir(parents=True,exist_ok=True)
+    path.write_text('#!/bin/sh\ntrue\n');path.chmod(mode)
+    (stage/name).write_text('#!/bin/sh\ntrue\n')
+(stage/'cue-matter-ipv6-rules').write_text((Path(sys.argv[1])/'rules').read_text())
+before=subprocess.check_output(['ip6tables','-S'])
+failed=False
+def command(args,allowed=(0,)):
+    global failed
+    if args[:2]==['systemctl','is-active']: return 'active'
+    if args[:2]==['systemctl','is-enabled']: return 'enabled'
+    if args[:2]==['systemctl','restart'] and not failed:
+        failed=True
+        subprocess.run(['sh',str(stage/'cue-matter-ipv6-rules')],env=dict(os.environ,CUE_LAN_NIC='peer1'),check=True)
+        raise RuntimeError('injected failure after actual new rules')
+    if args[0]=='systemctl': return ''
+    return recover.run(args,allowed)
+tx=recover.Transaction(root,command)
+try: tx.apply(stage)
+except RuntimeError as exc: assert 'injected' in str(exc),exc
+else: raise AssertionError('failure was not injected')
+assert subprocess.check_output(['ip6tables','-S'])==before,'rollback changed baseline rules'
+assert tx.load()['state']=='rolled_back'
+print('PASS: actual tagged-rule rollback preserves pre-existing tagged and SSH rules')
+PY
 echo 'PASS: real Linux rule application, idempotency, unrelated SSH rule preservation and carrier gate'

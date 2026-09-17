@@ -195,6 +195,9 @@ for t in ip ip6tables python3; do
     command -v "$t" >/dev/null 2>&1 || die "missing required tool: $t"
 done
 if [ "$BASELINE_ONLY" -eq 0 ]; then
+    RECOVER="$(CDPATH= cd -- "$(dirname "$0")" && pwd)/recover-install.py"
+    [ -r "$RECOVER" ] || die "missing companion recover-install.py; use the complete verified release"
+    python3 -c 'import sys; assert sys.version_info >= (3, 8)' || die "Python 3.8 or later required"
     command -v systemctl >/dev/null 2>&1 || die "missing required tool: systemctl"
     command -v install   >/dev/null 2>&1 || die "missing required tool: install"
     command -v flock >/dev/null 2>&1 || die "missing required tool: flock"
@@ -406,16 +409,20 @@ show_nic_rules() {
 
 # The ten lines the unit is responsible for (guide 3.3), checked individually so
 # unrelated pre-existing NIC rules cannot mask a missing one.
+rule_present() {
+    ip6tables -w 5 -C "$@" 2>/dev/null ||
+        ip6tables -w 5 -C "$@" -m comment --comment cue-matter-ipv6-v1 2>/dev/null
+}
 check_expected_rules() {
     missing=0
     for port in 5353 5540; do
-        ip6tables -w 5 -C INPUT  -i "$NIC" -p udp --sport "$port" -j ACCEPT 2>/dev/null || { warn "missing: INPUT  -i $NIC udp --sport $port"; missing=$((missing + 1)); }
-        ip6tables -w 5 -C INPUT  -i "$NIC" -p udp --dport "$port" -j ACCEPT 2>/dev/null || { warn "missing: INPUT  -i $NIC udp --dport $port"; missing=$((missing + 1)); }
-        ip6tables -w 5 -C OUTPUT -o "$NIC" -p udp --sport "$port" -j ACCEPT 2>/dev/null || { warn "missing: OUTPUT -o $NIC udp --sport $port"; missing=$((missing + 1)); }
-        ip6tables -w 5 -C OUTPUT -o "$NIC" -p udp --dport "$port" -j ACCEPT 2>/dev/null || { warn "missing: OUTPUT -o $NIC udp --dport $port"; missing=$((missing + 1)); }
+        rule_present INPUT  -i "$NIC" -p udp --sport "$port" -j ACCEPT 2>/dev/null || { warn "missing: INPUT  -i $NIC udp --sport $port"; missing=$((missing + 1)); }
+        rule_present INPUT  -i "$NIC" -p udp --dport "$port" -j ACCEPT 2>/dev/null || { warn "missing: INPUT  -i $NIC udp --dport $port"; missing=$((missing + 1)); }
+        rule_present OUTPUT -o "$NIC" -p udp --sport "$port" -j ACCEPT 2>/dev/null || { warn "missing: OUTPUT -o $NIC udp --sport $port"; missing=$((missing + 1)); }
+        rule_present OUTPUT -o "$NIC" -p udp --dport "$port" -j ACCEPT 2>/dev/null || { warn "missing: OUTPUT -o $NIC udp --dport $port"; missing=$((missing + 1)); }
     done
-    ip6tables -w 5 -C INPUT  -i "$NIC" -p ipv6-icmp -j ACCEPT 2>/dev/null || { warn "missing: INPUT  -i $NIC ipv6-icmp"; missing=$((missing + 1)); }
-    ip6tables -w 5 -C OUTPUT -o "$NIC" -p ipv6-icmp -j ACCEPT 2>/dev/null || { warn "missing: OUTPUT -o $NIC ipv6-icmp"; missing=$((missing + 1)); }
+    rule_present INPUT  -i "$NIC" -p ipv6-icmp -j ACCEPT 2>/dev/null || { warn "missing: INPUT  -i $NIC ipv6-icmp"; missing=$((missing + 1)); }
+    rule_present OUTPUT -o "$NIC" -p ipv6-icmp -j ACCEPT 2>/dev/null || { warn "missing: OUTPUT -o $NIC ipv6-icmp"; missing=$((missing + 1)); }
     return "$missing"
 }
 
@@ -482,16 +489,25 @@ fi
 
 # --------------------------------------------------------------- 4. install
 step "4. Install host unit (guide 3.3)"
-if [ "$PERSIST_MODULES" -eq 1 ]; then
-    printf 'ip6_tables\nip6table_filter\n' > "$MODCONF"
-fi
-
 TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT
+TX_ACTIVE=0
+cleanup_install() {
+    result=$?
+    trap - EXIT INT TERM
+    if [ "$TX_ACTIVE" = 1 ]; then
+        python3 "$RECOVER" rollback --inherited-lock 9 || {
+            warn "automatic rollback incomplete; run recover-install.py rollback before retrying"
+            result=3
+        }
+    fi
+    rm -rf "$TMPD"
+    exit "$result"
+}
+trap cleanup_install EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# ExecStart payload — byte-identical to guide 3.3.
+# Stage every payload before touching installed files.
 cat >"$TMPD/cue-matter-ipv6-rules" <<'RULES_EOF'
 #!/bin/sh
 set -eu
@@ -507,7 +523,8 @@ allow() {
     chain=$1
     shift
     ip6tables -w 5 -C "$chain" "$@" 2>/dev/null ||
-        ip6tables -w 5 -I "$chain" 1 "$@"
+        ip6tables -w 5 -C "$chain" "$@" -m comment --comment cue-matter-ipv6-v1 2>/dev/null ||
+        ip6tables -w 5 -I "$chain" 1 "$@" -m comment --comment cue-matter-ipv6-v1
 }
 for port in 5353 5540; do
     allow INPUT  -i "$nic" -p udp --sport "$port" -j ACCEPT
@@ -519,8 +536,6 @@ allow INPUT  -i "$nic" -p ipv6-icmp -j ACCEPT
 allow OUTPUT -o "$nic" -p ipv6-icmp -j ACCEPT
 RULES_EOF
 
-install -D -m 0755 "$TMPD/cue-matter-ipv6-rules" "$SBIN"
-log "installed $SBIN (0755) — payload identical to guide 3.3"
 
 # ExecStartPre helper: bounded wait for the renamed NIC. Separate file so no
 # shell metacharacter ever passes through systemd's Exec-line expansion.
@@ -557,10 +572,8 @@ echo "NIC $nic has no usable carrier/multicast/link-local address within ${wait_
 exit 1
 WAIT_EOF
 
-install -D -m 0755 "$TMPD/cue-matter-ipv6-wait-nic" "$WAITBIN"
-log "installed $WAITBIN (0755)"
 
-cat >"$UNIT" <<UNIT_EOF
+cat >"$TMPD/unit" <<UNIT_EOF
 [Unit]
 Description=Allow Matter IPv6 traffic on the Cue LAN interface
 Wants=network-online.target
@@ -572,7 +585,7 @@ Type=oneshot
 RuntimeDirectory=cue-matter-ipv6
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
-TimeoutStartSec=450
+TimeoutStartSec=500
 Environment=CUE_LAN_NIC=$NIC
 Environment=CUE_NIC_WAIT=$NIC_WAIT
 EnvironmentFile=-$DEFAULTS
@@ -590,18 +603,12 @@ log "installed $UNIT (ExecStartPre NIC wait: ${NIC_WAIT}s — deviation from gui
 {
     printf 'CUE_LAN_NIC=%s\n' "$NIC"
     printf 'CUE_NIC_WAIT=%s\n' "$NIC_WAIT"
-} > "$DEFAULTS"
-chmod 0644 "$DEFAULTS"
-log "pinned $DEFAULTS -> CUE_LAN_NIC=$NIC"
-
-systemctl daemon-reload || die "systemctl daemon-reload failed — files are written but the unit is not loaded"
-systemctl enable cue-matter-ipv6-rules.service || die "could not enable host unit" 3
-# start on an already-active oneshot does not execute its new payload.
-systemctl restart cue-matter-ipv6-rules.service || {
-    warn "host unit restart failed; unit journal follows"
-    journalctl -u cue-matter-ipv6-rules.service -n 20 --no-pager 2>/dev/null || true
-    die "could not enable/start cue-matter-ipv6-rules.service" 3
-}
+} > "$TMPD/defaults"
+if [ "$PERSIST_MODULES" -eq 1 ]; then
+    printf 'ip6_tables\nip6table_filter\n' > "$TMPD/modules"
+fi
+python3 "$RECOVER" apply --stage "$TMPD" --inherited-lock 9
+TX_ACTIVE=1
 
 # ----------------------------------------------------------------- 5. prove
 step "5. Prove Phase 1 (guide 3.4)"
@@ -690,6 +697,8 @@ if [ "$FAIL" -ne 0 ]; then
     exit 3
 fi
 
+python3 "$RECOVER" commit --inherited-lock 9
+TX_ACTIVE=0
 step "PHASE 1 DONE (guide 3.5)"
 log "  [x] $SBIN present, mode 0755"
 log "  [x] unit enabled and active"
