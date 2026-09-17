@@ -67,8 +67,8 @@ case "${CUE_SKU:-}" in
     *[!a-zA-Z0-9_-]*) printf 'ABORT: invalid CUE_SKU\n' >&2; exit 64 ;;
 esac
 
-PHASE1_URL=${CUE_PHASE1_URL:-https://raw.githubusercontent.com/CueHome/Deploy-IPv6/7bdae5925230b20615c8e945a63f491c7b5aa00e/cue-matter-ipv6-changes.sh}
-PHASE1_SHA256=${CUE_PHASE1_SHA256:-82ad62e949bbe1657c9fc4ea8cca09f776f813abfeefae2640833f91cbeb092a}
+PHASE1_URL=${CUE_PHASE1_URL:-https://raw.githubusercontent.com/CueHome/Deploy-IPv6/98472f9a01dcabe1de6d1a0e061cde306f2abb56/cue-matter-ipv6-changes.sh}
+PHASE1_SHA256=${CUE_PHASE1_SHA256:-731c8178e1e230737d241a71186d09e815bed860a9823dad29a234c040a4a21c}
 LOGDIR=/var/log/cue-matter-ipv6
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 START_EPOCH=$(date -u +%s)
@@ -252,6 +252,22 @@ else
 fi
 
 # ----------------------------------------------------------------- 7. run it
+if [ "$MODE" = install ]; then
+    RECOVERY_URL=${CUE_RECOVERY_URL:-https://raw.githubusercontent.com/CueHome/Deploy-IPv6/98472f9a01dcabe1de6d1a0e061cde306f2abb56/recover-install.py}
+    RECOVERY_SHA256=${CUE_RECOVERY_SHA256:-7c63372fcaae495ebe4fd2b0b6e5d0bb70dda0b320ffaca087fc15f0e55115f2}
+    RECOVERY="$TMPD/recover-install.py"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --retry 3 --retry-delay 2 --max-time 90 -o "$RECOVERY" "$RECOVERY_URL" || abort "recovery download failed" 65
+    else
+        wget -q -T 90 -t 3 -O "$RECOVERY" "$RECOVERY_URL" || abort "recovery download failed" 65
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then
+        RECOVERY_GOT=$(sha256sum "$RECOVERY" | awk '{print $1}')
+    else
+        RECOVERY_GOT=$(openssl dgst -sha256 "$RECOVERY" | awk '{print $NF}')
+    fi
+    [ "$RECOVERY_GOT" = "$RECOVERY_SHA256" ] || abort "recovery digest mismatch" 65
+fi
 set -- --nic "$NIC" --sku "$SKU" --yes
 if [ "$BOARD" != unknown ]; then
     set -- "$@" --require-board "$BOARD"
