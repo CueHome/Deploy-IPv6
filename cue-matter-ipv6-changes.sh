@@ -259,6 +259,9 @@ fi
 if [ "$D_DEF" = 1 ]; then
     warn "conf.default.disable_ipv6=1 — any new or re-created interface comes up without IPv6; note it on the row"
 fi
+if [ "$BASELINE_ONLY" = 0 ] && { [ "$D_ALL" != 0 ] || [ "$D_DEF" != 0 ]; }; then
+    die "IPv6 provisioning is inconsistent. Run provision-ipv6.py --nic $NIC --check, then the explicit --apply provisioning step before installing firewall rules." 4
+fi
 
 
 ip link show dev "$NIC" >/dev/null 2>&1 || {

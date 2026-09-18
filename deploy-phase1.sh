@@ -68,7 +68,7 @@ case "${CUE_SKU:-}" in
 esac
 
 PHASE1_URL=${CUE_PHASE1_URL:-https://raw.githubusercontent.com/CueHome/Deploy-IPv6/98472f9a01dcabe1de6d1a0e061cde306f2abb56/cue-matter-ipv6-changes.sh}
-PHASE1_SHA256=${CUE_PHASE1_SHA256:-731c8178e1e230737d241a71186d09e815bed860a9823dad29a234c040a4a21c}
+PHASE1_SHA256=${CUE_PHASE1_SHA256:-34c70a9f37bf4144baeb2d37d1d8076d082ad8e379ffb4dcfdea31073f8f0ef7}
 LOGDIR=/var/log/cue-matter-ipv6
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 START_EPOCH=$(date -u +%s)
