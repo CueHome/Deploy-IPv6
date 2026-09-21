@@ -198,6 +198,7 @@ if [ "$BASELINE_ONLY" -eq 0 ]; then
     RECOVER="$(CDPATH= cd -- "$(dirname "$0")" && pwd)/recover-install.py"
     [ -r "$RECOVER" ] || die "missing companion recover-install.py; use the complete verified release"
     python3 -c 'import sys; assert sys.version_info >= (3, 8)' || die "Python 3.8 or later required"
+    python3 "$RECOVER" check-policy --nic "$NIC" || die "persistent IPv6 configuration conflict; see file/line diagnostics above" 4
     command -v systemctl >/dev/null 2>&1 || die "missing required tool: systemctl"
     command -v install   >/dev/null 2>&1 || die "missing required tool: install"
     command -v flock >/dev/null 2>&1 || die "missing required tool: flock"
@@ -258,6 +259,9 @@ if [ "$D_ALL" = 1 ]; then
 fi
 if [ "$D_DEF" = 1 ]; then
     warn "conf.default.disable_ipv6=1 — any new or re-created interface comes up without IPv6; note it on the row"
+fi
+if [ "$BASELINE_ONLY" = 0 ] && { [ "$D_ALL" != 0 ] || [ "$D_DEF" != 0 ]; }; then
+    die "IPv6 provisioning is inconsistent. Run provision-ipv6.py --nic $NIC --check, then the explicit --apply provisioning step before installing firewall rules." 4
 fi
 
 

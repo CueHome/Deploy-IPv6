@@ -10,4 +10,6 @@ jobs:
       - run: sh test/preflight.sh
       - run: python3 test/runtime.py
       - run: python3 test/transaction.py
+      - run: python3 test/policy-conflicts.py
+      - run: python3 test/provision.py
       - run: sudo sh test/linux-netns.sh
