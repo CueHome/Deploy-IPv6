@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 
 POLICY = '/etc/cue-matter-ipv6.conf'
@@ -46,6 +47,9 @@ def main():
     group.add_argument('--apply', action='store_true')
     args = parser.parse_args()
     policy, unit = render(args.nic)
+    # Resolve contradictory administrator policy explicitly, never win a boot-time race.
+    subprocess.run([sys.executable, str(Path(__file__).with_name('recover-install.py')),
+                    'check-policy', '--nic', args.nic], check=True)
     if 'ipv6.disable=1' in Path('/proc/cmdline').read_text().split():
         raise RuntimeError('Kernel IPv6 is disabled; boot argument remediation and reboot required')
     names = ('all', 'default', 'lo', args.nic)
@@ -61,6 +65,8 @@ def main():
     # Refuse to overwrite existing management policy; repeated identical installs are safe.
     targets = {Path(POLICY): policy, Path('/etc/systemd/system') / UNIT: unit}
     for path, value in targets.items():
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise RuntimeError(f'Refusing non-regular policy target: {path}')
         if path.exists() and path.read_text() != value:
             raise RuntimeError(f'Existing policy differs: {path}; review before replacing')
     backup = Path(tempfile.mkdtemp(prefix='cue-ipv6-policy-', dir='/var/tmp'))

@@ -4,7 +4,7 @@ The production test host had `all.disable_ipv6=1` and `default.disable_ipv6=1`, 
 had enabled IPv6 on end1. A successful send in that state did not demonstrate persistent provisioning.
 
 The rules installer now refuses installation with inconsistent global/default values. Baseline mode
-remains read-only. An explicit separate provisioning step is supplied:
+remains diagnostic (it writes logs and sends a probe). An explicit separate provisioning step is supplied:
 
     sudo python3 provision-ipv6.py --nic end1 --check
     sudo python3 provision-ipv6.py --nic end1 --apply
@@ -15,8 +15,12 @@ The NIC key tolerates a late udev rename at boot; default=0 covers subsequently 
 The existing rules service still waits for carrier and a usable link-local address.
 
 This is an explicit host-wide IPv6 enablement policy. It does not rewrite administrator sysctl files,
-change firewall policy, restart containers, or operate on MQTT/HA. It overrides earlier sysctl-disable
-settings at boot. Later manual sysctl loads can disable IPv6 again and must be addressed operationally.
+change firewall policy, restart containers, or operate on MQTT/HA. Before checking or applying policy,
+it rejects persistent disable directives targeting all/default/loopback/the selected NIC, with file
+and line evidence. Administrators must reconcile those settings explicitly; the tool does not
+silently compete with them at boot. The scan respects same-basename sysctl.d priority and /dev/null
+masks, and is intentionally conservative about distinct-file overrides. Later manual writes or
+external managers can still disable IPv6; this is not an enforcement daemon.
 It refuses kernel `ipv6.disable=1`, unsafe interface names, and different existing policy files.
 Prior runtime values are retained under /var/tmp/cue-ipv6-policy-*. Failed installs retain evidence
 and do not automatically disable IPv6 again, since that could remove live IPv6 addresses.

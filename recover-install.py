@@ -6,6 +6,8 @@ from contextlib import contextmanager
 import fcntl
 import json
 import os
+import re
+import fnmatch
 from pathlib import Path
 import shlex
 import stat
@@ -22,6 +24,35 @@ FILES = {
     'defaults': ('etc/default/cue-matter-ipv6-rules', 0o644),
     'modules': ('etc/modules-load.d/cue-matter-ipv6.conf', 0o644),
 }
+
+
+def persistent_ipv6_conflicts(root, nic):
+    """Report disabling directives, respecting same-basename sysctl.d precedence.
+
+    Conservative: a later enabling override does not erase a dangerous directive
+    that another supported loader can apply. Never edits administrator files.
+    """
+    if not re.fullmatch(r'[a-zA-Z0-9_][a-zA-Z0-9_.:-]{0,14}', nic):
+        raise ValueError('invalid interface')
+    files = {}
+    for directory in ('lib/sysctl.d', 'usr/lib/sysctl.d', 'usr/local/lib/sysctl.d', 'run/sysctl.d', 'etc/sysctl.d'):
+        for path in sorted((root / directory).glob('*.conf')):
+            files[path.name] = path
+    candidates = list(files.values())
+    if (root / 'etc/sysctl.conf').exists():
+        candidates.append(root / 'etc/sysctl.conf')
+    seen = set()
+    conflicts = []
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved in seen or str(resolved) == '/dev/null':
+            continue
+        seen.add(resolved)
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            match = re.match(r'^\s*-?net[./]ipv6[./]conf[./](.+)[./]disable_ipv6\s*=\s*1\s*(?:[#;].*)?$', line)
+            if match and any(fnmatch.fnmatchcase(name, match[1]) for name in ('all', 'default', 'lo', nic)):
+                conflicts.append({'file': str(path), 'line': number, 'setting': line.strip()})
+    return conflicts
 
 
 @contextmanager
@@ -191,10 +222,19 @@ class Transaction:
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=('apply', 'commit', 'rollback'))
+    parser.add_argument('action', choices=('apply', 'commit', 'rollback', 'check-policy'))
+    parser.add_argument('--nic')
     parser.add_argument('--stage', type=Path)
     parser.add_argument('--inherited-lock', type=int)
     args = parser.parse_args()
+    if args.action == 'check-policy':
+        if not args.nic:
+            raise RuntimeError('--nic required')
+        conflicts = persistent_ipv6_conflicts(Path('/'), args.nic)
+        print(json.dumps({'persistent_ipv6_conflicts': conflicts}))
+        if conflicts:
+            raise SystemExit('Resolve conflicting persistent IPv6 disable directives before installation')
+        return
     if os.geteuid() != 0:
         raise RuntimeError('run as root')
     lockpath = Path('/run/cue-matter-ipv6/install.lock')
